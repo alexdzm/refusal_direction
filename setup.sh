@@ -7,13 +7,13 @@ version_ge() {
 }
 
 check_python() {
-    if ! command -v python3 &> /dev/null; then
+    if ! command -v python3.11 &> /dev/null; then
         echo "Python3 not be found."
         return 1
     fi
 
     # Get the current Python version as a string
-    PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
+    PYTHON_VERSION=$(python3.11 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
 
     # Check if the current Python version is greater than or equal to the required version
     if ! version_ge "$PYTHON_VERSION" "$REQUIRED_PYTHON"; then
@@ -54,7 +54,7 @@ setup_together() {
 setup_venv() {
     echo "Setting up venv..."
 
-    python -m venv venv
+    python3.11 -m venv venv
     source venv/bin/activate
 
     echo "Done setting up venv!"
