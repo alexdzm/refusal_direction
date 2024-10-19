@@ -186,5 +186,6 @@ def run_pipeline(model_path):
     evaluate_loss_for_datasets(cfg, model_base, actadd_fwd_pre_hooks, actadd_fwd_hooks, 'actadd')
 
 if __name__ == "__main__":
-    args = parse_arguments()
-    run_pipeline(model_path=args.model_path)
+    #args = parse_arguments()
+    model_path="meta-llama/Llama-3.2-1B-Instruct"
+    run_pipeline(model_path=model_path)

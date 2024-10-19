@@ -170,8 +170,8 @@ def llamaguard2_judge_fn(prompts: List[str], responses: List[str]) -> List[int]:
 
     classifier = LlamaGuard2Classifier(os.environ["TOGETHER_API_KEY"])
 
-    batch_size = 20  # Adjust this value based on the API's rate limits
-    delay = 1  # Delay in seconds between batches
+    batch_size = 10  # Adjust this value based on the API's rate limits
+    delay = 3  # Delay in seconds between batches
 
     classifications = []
     for i in range(0, len(prompts), batch_size):
