@@ -13,6 +13,7 @@ from einops import rearrange
 
 from pipeline.model_utils.model_base import ModelBase
 from pipeline.utils.hook_utils import add_hooks, get_activation_addition_input_pre_hook, get_direction_ablation_input_pre_hook, get_direction_ablation_output_hook
+from pipeline.submodules.train_direction import train_basis_weights
 
 def refusal_score(
     logits: Float[Tensor, 'batch seq d_vocab_out'],
@@ -420,6 +421,93 @@ def select_aggregate_direction(
             continue
 
         filtered_scores.append((sorting_score, source_pos))
+
+        json_output_filtered_scores.append({
+            'position': source_pos,
+            'layer': None,
+            'refusal_score': ablation_refusal_scores[source_pos].item(),
+            'steering_score': steering_refusal_scores[source_pos].item(),
+            'kl_div_score': ablation_kl_div_scores[source_pos].item()
+        })   
+
+    with open(f"{artifact_dir}/aggregate_direction_evaluations.json", 'w') as f:
+        json.dump(json_output_all_scores, f, indent=4)
+
+    json_output_filtered_scores = sorted(json_output_filtered_scores, key=lambda x: x['refusal_score'], reverse=False)
+
+    with open(f"{artifact_dir}//aggregate_direction_evaluations_filtered.json", 'w') as f:
+        json.dump(json_output_filtered_scores, f, indent=4)
+
+    assert len(filtered_scores) > 0, "All scores have been filtered out!"
+
+    # sorted in descending order
+    filtered_scores = sorted(filtered_scores, key=lambda x: x[0], reverse=True)
+
+    # now return the best position, layer, and direction
+    score, pos = filtered_scores[0]
+
+    print(f"Selected direction: position={pos}")
+    print(f"Refusal score: {ablation_refusal_scores[pos]:.4f} (baseline: {baseline_refusal_scores_harmful.mean().item():.4f})")
+    print(f"Steering score: {steering_refusal_scores[pos]:.4f} (baseline: {baseline_refusal_scores_harmless.mean().item():.4f})")
+    print(f"KL Divergence: {ablation_kl_div_scores[pos]:.4f}")
+    
+    return pos,candidate_directions[pos]
+
+def optimise_aggregate_direction(
+    model_base: ModelBase,
+    harmful_instructions,
+    harmless_instructions,
+    candidate_directions: Float[Tensor, 'n_pos d_model'],
+    artifact_dir,
+    kl_threshold=0.1, # directions larger KL score are filtered out
+    induce_refusal_threshold=0.0, # directions with a lower inducing refusal score are filtered out
+    prune_layer_percentage=0.2, # discard the directions extracted from the last 20% of the model
+    batch_size=32
+):
+    if not os.path.exists(artifact_dir):
+        os.makedirs(artifact_dir)
+
+    n_pos, d_model = candidate_directions.shape
+   
+
+    baseline_refusal_scores_harmful = get_refusal_scores(model_base.model, harmful_instructions, model_base.tokenize_instructions_fn, model_base.refusal_toks, fwd_hooks=[], batch_size=batch_size)
+    baseline_refusal_scores_harmless = get_refusal_scores(model_base.model, harmless_instructions, model_base.tokenize_instructions_fn, model_base.refusal_toks, fwd_hooks=[], batch_size=batch_size)
+
+    ablation_kl_div_scores = torch.zeros((n_pos), device=model_base.model.device, dtype=torch.float64)
+    ablation_refusal_scores = torch.zeros((n_pos), device=model_base.model.device, dtype=torch.float64)
+    steering_refusal_scores = torch.zeros((n_pos), device=model_base.model.device, dtype=torch.float64)
+
+
+    basis_directions=torch.linalg.qr(candidate_directions.T)[0].T
+    
+    #refusal ablation
+    model,losses=train_basis_weights(basis_directions,model_base,harmful_instructions,get_refusal_scores,num_epochs=100,lr=0.01)
+
+    # ablation_refusal_scores[source_pos] = refusal_scores.mean().item()
+
+    # for source_pos in range(-n_pos, 0):#refusal addition
+    #         refusal_vector = candidate_directions[source_pos]
+    #         coeff = torch.tensor(1.0)
+    #         #Note this is different from the OG paper where they only do addition at the layer the direction comes from
+    #         fwd_pre_hooks = [(model_base.model_block_modules[layer], get_direction_ablation_input_pre_hook(direction=ablation_dir)) for layer in range(model_base.model.config.num_hidden_layers)]
+    #         fwd_hooks = []
+
+    #         refusal_scores = get_refusal_scores(model_base.model, harmless_instructions, model_base.tokenize_instructions_fn, model_base.refusal_toks, fwd_pre_hooks=fwd_pre_hooks, fwd_hooks=fwd_hooks, batch_size=batch_size)
+    #         steering_refusal_scores[source_pos] = refusal_scores.mean().item()
+
+    filtered_scores = []
+    json_output_all_scores = []
+    json_output_filtered_scores = []
+
+    for source_pos in range(-n_pos, 0):
+
+        json_output_all_scores.append({
+            'position': source_pos,
+            'layer': None,
+            'refusal_score': ablation_refusal_scores[source_pos].item(),
+            'steering_score': steering_refusal_scores[source_pos].item(),
+            'kl_div_score': ablation_kl_div_scores[source_pos].item()
+        })
 
         json_output_filtered_scores.append({
             'position': source_pos,
