@@ -11,7 +11,7 @@ from pipeline.model_utils.model_factory import construct_model_base
 from pipeline.utils.hook_utils import get_activation_addition_input_pre_hook, get_all_direction_ablation_hooks
 
 from pipeline.submodules.generate_directions import generate_directions,generate_direction
-from pipeline.submodules.select_direction import select_direction, get_refusal_scores
+from pipeline.submodules.select_direction import select_direction,select_aggregate_direction, get_refusal_scores
 from pipeline.submodules.evaluate_jailbreak import evaluate_jailbreak
 from pipeline.submodules.evaluate_loss import evaluate_loss
 
@@ -109,6 +109,26 @@ def select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candid
 
     return pos, layer, direction
 
+def select_and_save_aggregate_direction(cfg, model_base, harmful_val, harmless_val, candidate_direction):
+    """Select and save the direction."""
+    if not os.path.exists(os.path.join(cfg.artifact_path(), 'select_aggregate_direction')):
+        os.makedirs(os.path.join(cfg.artifact_path(), 'select_aggregate_direction'))
+
+    pos, layer, direction = select_aggregate_direction(
+        model_base,
+        harmful_val,
+        harmless_val,
+        candidate_direction,
+        artifact_dir=os.path.join(cfg.artifact_path(), "select_aggregate_direction")
+    )
+
+    with open(f'{cfg.artifact_path()}/aggregate_direction_metadata.json', "w") as f:
+        json.dump({"pos": pos, "layer": layer}, f, indent=4)
+
+    torch.save(direction, f'{cfg.artifact_path()}/aggregate_direction.pt')
+
+    return pos, layer, direction
+
 def generate_and_save_completions_for_dataset(cfg, model_base, fwd_pre_hooks, fwd_hooks, intervention_label, dataset_name, dataset=None):
     """Generate and save completions for a dataset."""
     if not os.path.exists(os.path.join(cfg.artifact_path(), 'completions')):
@@ -162,12 +182,13 @@ def run_pipeline(model_path):
     harmful_train, harmless_train, harmful_val, harmless_val = filter_data(cfg, model_base, harmful_train, harmless_train, harmful_val, harmless_val)
 
     # 1. Generate candidate refusal directions
-    candidate_directions = generate_and_save_candidate_directions(cfg, model_base, harmful_train, harmless_train)
+    #candidate_directions = generate_and_save_candidate_directions(cfg, model_base, harmful_train, harmless_train)
     candidate_direction = generate_and_save_candidate_direction(cfg, model_base, harmful_train, harmless_train)
     
     # 2. Select the most effective refusal direction
-    pos, layer, direction = select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candidate_directions)
-    pos,layer,direction = -2,8,torch.load('pipeline/runs/Llama-3.2-1B-Residual-Only/direction.pt')
+    #pos, layer, direction = select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candidate_directions)
+    pos, direction = select_and_save_aggregate_direction(cfg, model_base, harmful_val, harmless_val, candidate_direction)
+    
 
     baseline_fwd_pre_hooks, baseline_fwd_hooks = [], []
     ablation_fwd_pre_hooks, ablation_fwd_hooks = get_all_direction_ablation_hooks(model_base, direction)
