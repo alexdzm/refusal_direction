@@ -218,8 +218,9 @@ def run_pipeline(model_path):
     harmful_train, harmless_train, harmful_val, harmless_val = filter_data(cfg, model_base, harmful_train, harmless_train, harmful_val, harmless_val)
 
     # 1. Generate candidate refusal directions
-    #candidate_directions = generate_and_save_candidate_directions(cfg, model_base, harmful_train, harmless_train)
-    candidate_direction = generate_and_save_candidate_direction(cfg, model_base, harmful_train, harmless_train)
+    candidate_direction = generate_and_save_candidate_directions(cfg, model_base, harmful_train, harmless_train)
+    candidate_direction= candidate_direction.reshape(-1, candidate_direction.shape[-1])
+    #candidate_direction = generate_and_save_candidate_direction(cfg, model_base, harmful_train, harmless_train)
     
     # 2. Select the most effective refusal direction
     #pos, layer, direction = select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candidate_directions)
