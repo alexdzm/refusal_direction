@@ -144,7 +144,7 @@ def select_and_save_aggregate_direction(cfg, model_base, harmful_val, harmless_v
 
     return pos, layer, direction
 
-def optimise_and_save_aggregate_direction(cfg, model_base, harmful_train, harmless_train, candidate_direction):
+def optimise_and_save_aggregate_direction(cfg, model_base, harmful_train, harmless_train, candidate_direction,harmful_val_instructions=None):
     """Select and save the direction."""
     if not os.path.exists(os.path.join(cfg.artifact_path(), 'optimise_aggregate_direction')):
         os.makedirs(os.path.join(cfg.artifact_path(), 'optimise_aggregate_direction'))
@@ -154,6 +154,7 @@ def optimise_and_save_aggregate_direction(cfg, model_base, harmful_train, harmle
         harmful_train,
         harmless_train,
         candidate_direction,
+        harmful_val_instructions=harmful_val_instructions,
         artifact_dir=os.path.join(cfg.artifact_path(), "optimise_aggregate_direction")
     )
 
@@ -223,7 +224,7 @@ def run_pipeline(model_path):
     # 2. Select the most effective refusal direction
     #pos, layer, direction = select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candidate_directions)
     #pos, direction = select_and_save_aggregate_direction(cfg, model_base, harmful_val, harmless_val, candidate_direction)
-    pos, direction = optimise_and_save_aggregate_direction(cfg, model_base, harmful_train, harmless_train, candidate_direction)
+    pos, direction = optimise_and_save_aggregate_direction(cfg, model_base, harmful_train, harmless_train, candidate_direction,harmful_val_instructions=harmful_val)
 
     baseline_fwd_pre_hooks, baseline_fwd_hooks = [], []
     ablation_fwd_pre_hooks, ablation_fwd_hooks = get_all_direction_ablation_hooks(model_base, direction)

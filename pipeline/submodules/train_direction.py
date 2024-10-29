@@ -2,16 +2,36 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import functools
-from typing import List, Tuple, Callable, Any
+from typing import List, Tuple, Callable, Any,Dict
 from torch import Tensor
 
 class BasisWeightModel(nn.Module):
     def __init__(self, num_basis_vectors: int, model_base: Any) -> None:
         super().__init__()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # Initialize weights with requires_grad=True by default since it's a Parameter
-        self.weights = nn.Parameter(torch.randn(num_basis_vectors, device=device, dtype=torch.bfloat16))
+        # Initialize weights with specified value
+        self.weights = nn.Parameter(-torch.ones((num_basis_vectors), device=device, dtype=torch.bfloat16))
         self.model_base = model_base
+    
+    def compute_direction(self, basis_vectors: Tensor) -> Tensor:
+        """
+        Compute the weighted direction while preserving sign information.
+        Scale the magnitude but maintain the overall direction.
+        """
+        # Combine basis vectors with learned weights
+        weighted_direction = torch.sum(
+            basis_vectors * self.weights.unsqueeze(1),
+            dim=0,
+            keepdim=False
+        )
+        
+        # Scale the magnitude but preserve the sign
+        # Using a softer normalization that preserves direction differences
+        norm = torch.norm(weighted_direction, p=2)
+        scale_factor = torch.log1p(norm) / (norm + 1e-6)
+        weighted_direction = weighted_direction * scale_factor
+        
+        return weighted_direction
     
     def forward(
         self,
@@ -21,30 +41,20 @@ class BasisWeightModel(nn.Module):
         harmful_instructions: List[str],
         batch_size: int
     ) -> Tensor:
-        # Ensure basis vectors have requires_grad=True
         basis_vectors = basis_vectors.to(device=self.weights.device, dtype=self.weights.dtype)
         basis_vectors.requires_grad_(True)
         
-        # Combine basis vectors with learned weights
-        weighted_direction = torch.sum(
-            basis_vectors * self.weights.unsqueeze(1),
-            dim=0,
-            keepdim=False
-        )
-        
-        # Normalize the weighted direction while maintaining gradient flow
-        norm = torch.norm(weighted_direction, p=2)
-        weighted_direction = weighted_direction / (norm + 1e-6)  # Add small epsilon to avoid division by zero
+        # Use the new direction computation
+        weighted_direction = self.compute_direction(basis_vectors)
         
         # Create hooks using the weighted direction
         fwd_pre_hooks: List[Tuple[Any, Callable]] = [
             (self.model_base.model_block_modules[layer], 
-             get_pre_hook_fn(direction=weighted_direction))  # Remove detach() and clone()
+             get_pre_hook_fn(direction=weighted_direction))
             for layer in range(self.model_base.model.config.num_hidden_layers)
         ]
         fwd_hooks: List = []
         
-        # Create partial function with the new hooks
         scores_fn = functools.partial(
             get_refusal_scores_fn,
             model=self.model_base.model,
@@ -56,9 +66,9 @@ class BasisWeightModel(nn.Module):
             batch_size=batch_size
         )
         
-        # Get refusal scores
         refusal_scores = scores_fn()
         return refusal_scores.mean()
+
 
 def get_direction_ablation_input_pre_hook(direction: Tensor) -> Callable:
     """
@@ -86,57 +96,180 @@ def get_direction_ablation_input_pre_hook(direction: Tensor) -> Callable:
 def train_basis_weights(
     basis_vectors: Tensor,
     model_base: Any,
-    harmful_instructions: List[str],
+    train_instructions: List[str],
+    val_instructions: List[str],
     get_refusal_scores_fn: Callable,
     batch_size: int = 32,
     num_epochs: int = 1000,
-    lr: float = 0.01
-) -> Tuple[BasisWeightModel, List[float]]:
+    lr: float = 0.01,
+    patience: int = 5,
+    min_delta: float = 1e-10,
+    weight_decay: float = 0.01,
+) -> Tuple[BasisWeightModel, Dict[str, List[float]], Tensor]:
     """
-    Train weights to maximize mean refusal score.
+    Train weights with sign-sensitive direction computation.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_vectors = basis_vectors.shape[0]
     
-    # Initialize model and move to appropriate device
-    model = BasisWeightModel(num_basis_vectors=num_vectors, model_base=model_base)
+    # Initialize model with specified initial weight value
+    model = BasisWeightModel(num_vectors, model_base)
     model = model.to(device)
     
-    # Convert basis vectors to bfloat16 and ensure requires_grad=True
+    optimizer = optim.AdamW(
+        params=model.parameters(),
+        lr=lr,
+        weight_decay=weight_decay
+    )
+    
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=patience//2,
+        verbose=True
+    )
+    
     basis_vectors = basis_vectors.to(device=device, dtype=torch.bfloat16)
     basis_vectors.requires_grad_(True)
     
-    # Enable gradient computation for the model
-    model.train()
+    history = {
+        'train_scores': [],
+        'val_scores': [],
+        'weights': [],
+        'direction_norms': []
+    }
     
-    optimizer = optim.Adam(params=model.parameters(), lr=lr)
-    losses: List[float] = []
+    best_val_score = float('inf')
+    best_model_state = None
+    best_weighted_direction = None
+    patience_counter = 0
     
+    print("Starting training...")
     for epoch in range(num_epochs):
+        model.train()
         optimizer.zero_grad()
         
-        # Calculate mean refusal score with dynamically created hooks
-        mean_score = model(
+        # Store weights before update
+        history['weights'].append(model.weights.detach().cpu())
+        
+        # Compute direction and its norm
+        weighted_direction = model.compute_direction(basis_vectors)
+        history['direction_norms'].append(torch.norm(weighted_direction).item())
+        
+        train_score = model(
             basis_vectors=basis_vectors,
             get_refusal_scores_fn=get_refusal_scores_fn,
             get_pre_hook_fn=get_direction_ablation_input_pre_hook,
-            harmful_instructions=harmful_instructions,
+            harmful_instructions=train_instructions,
             batch_size=batch_size
         )
         
-        # We want to maximize the score, so minimize negative
-        loss = -mean_score
-        
-        # Ensure loss requires grad
-        if not loss.requires_grad:
-            raise RuntimeError("Loss does not require grad. Check if all operations maintain gradient information.")
-            
+        loss = train_score
         loss.backward()
+        
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
-        losses.append(loss.item())
+        # Validation step
+        model.eval()
+        with torch.no_grad():
+            weighted_direction = model.compute_direction(basis_vectors)
+            val_score, _ = validate_basis_weights(
+                model=model,
+                weighted_direction=weighted_direction,
+                validation_instructions=val_instructions,
+                get_refusal_scores_fn=get_refusal_scores_fn,
+                batch_size=batch_size
+            )
         
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}, Loss: {loss.item():.4f}, Weights: {model.weights.cpu().detach()}")
+        history['train_scores'].append(train_score.item())
+        history['val_scores'].append(val_score)
+        
+        scheduler.step(val_score)
+        
+        if val_score < best_val_score - min_delta:
+            best_val_score = val_score
+            best_model_state = model.state_dict()
+            best_weighted_direction = weighted_direction.clone()
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        
+        if epoch % 5 == 0:
+            print(f"Epoch {epoch}: Train Score: {train_score.item():.4f}, "
+                  f"Val Score: {val_score:.4f}, "
+                  f"Direction Norm: {history['direction_norms'][-1]:.4f}, "
+                  f"Weights: {model.weights.detach().cpu()}")
+        
+        # if patience_counter >= patience:
+        #     print(f"Early stopping triggered at epoch {epoch}")
+        #     break
     
-    return model, losses
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    
+    return model, history, best_weighted_direction
+
+def validate_basis_weights(
+    model: BasisWeightModel,
+    weighted_direction: Tensor,
+    validation_instructions: List[str],
+    get_refusal_scores_fn: Callable,
+    batch_size: int = 32
+) -> Tuple[float, List[float]]:
+    """
+    Evaluate the trained basis weights model on a validation set of instructions.
+    
+    Args:
+        model: Trained BasisWeightModel instance
+        weighted_direction: Pre-computed weighted and normalized direction vector
+        validation_instructions: List of instructions to validate against
+        get_refusal_scores_fn: Function to compute refusal scores
+        batch_size: Batch size for validation
+        
+    Returns:
+        Tuple containing:
+        - mean_validation_score: Average refusal score across all validation instructions
+        - individual_scores: List of refusal scores for each instruction
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Ensure model is in evaluation mode
+    model.eval()
+    
+    # Move weighted direction to correct device and dtype
+    weighted_direction = weighted_direction.to(device=device, dtype=torch.bfloat16)
+    
+    try:
+        with torch.no_grad():
+            # Create hooks using the pre-computed weighted direction
+            fwd_pre_hooks = [
+                (model.model_base.model_block_modules[layer],
+                 get_direction_ablation_input_pre_hook(direction=weighted_direction))
+                for layer in range(model.model_base.model.config.num_hidden_layers)
+            ]
+            
+            # Get individual scores for each instruction
+            individual_scores = get_refusal_scores_fn(
+                model=model.model_base.model,
+                instructions=validation_instructions,
+                tokenize_instructions_fn=model.model_base.tokenize_instructions_fn,
+                refusal_toks=model.model_base.refusal_toks,
+                fwd_pre_hooks=fwd_pre_hooks,
+                fwd_hooks=[],
+                batch_size=batch_size
+            ).tolist()
+            
+            # Calculate mean score
+            mean_score = sum(individual_scores) / len(individual_scores)
+            
+            return mean_score, individual_scores
+            
+    except Exception as e:
+        print(f"Error during validation: {str(e)}")
+        raise
+    finally:
+        # Return model to training mode if needed
+        model.train()

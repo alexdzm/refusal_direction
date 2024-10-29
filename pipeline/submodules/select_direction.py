@@ -13,7 +13,7 @@ from einops import rearrange
 
 from pipeline.model_utils.model_base import ModelBase
 from pipeline.utils.hook_utils import add_hooks, get_activation_addition_input_pre_hook, get_direction_ablation_input_pre_hook, get_direction_ablation_output_hook
-from pipeline.submodules.train_direction import train_basis_weights
+from pipeline.submodules.train_direction import train_basis_weights,validate_basis_weights
 
 def refusal_score(
     logits: Float[Tensor, 'batch seq d_vocab_out'],
@@ -462,7 +462,8 @@ def optimise_aggregate_direction(
     kl_threshold=0.1, # directions larger KL score are filtered out
     induce_refusal_threshold=0.0, # directions with a lower inducing refusal score are filtered out
     prune_layer_percentage=0.2, # discard the directions extracted from the last 20% of the model
-    batch_size=32
+    batch_size=32,
+    harmful_val_instructions=None,
 ):
     if not os.path.exists(artifact_dir):
         os.makedirs(artifact_dir)
@@ -481,8 +482,10 @@ def optimise_aggregate_direction(
     basis_directions=torch.linalg.qr(candidate_directions.T)[0].T
     
     #refusal ablation
-    model,losses=train_basis_weights(basis_directions,model_base,harmful_instructions,get_refusal_scores,num_epochs=100,lr=0.01)
-
+    model,losses,direction=train_basis_weights(basis_directions,model_base,harmful_instructions,harmful_val_instructions,get_refusal_scores,num_epochs=100,lr=0.1)
+    val_score,all_score=validate_basis_weights(model,direction,harmful_val_instructions,get_refusal_scores)
+    print(direction)
+    print(val_score)
     # ablation_refusal_scores[source_pos] = refusal_scores.mean().item()
 
     # for source_pos in range(-n_pos, 0):#refusal addition
