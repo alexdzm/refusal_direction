@@ -10,7 +10,7 @@ from pipeline.config import Config
 from pipeline.model_utils.model_factory import construct_model_base
 from pipeline.utils.hook_utils import get_activation_addition_input_pre_hook, get_all_direction_ablation_hooks
 
-from pipeline.submodules.generate_directions import generate_directions
+from pipeline.submodules.generate_directions import generate_directions,generate_direction
 from pipeline.submodules.select_direction import select_direction, get_refusal_scores
 from pipeline.submodules.evaluate_jailbreak import evaluate_jailbreak
 from pipeline.submodules.evaluate_loss import evaluate_loss
@@ -71,6 +71,21 @@ def generate_and_save_candidate_directions(cfg, model_base, harmful_train, harml
         artifact_dir=os.path.join(cfg.artifact_path(), "generate_directions"))
 
     torch.save(mean_diffs, os.path.join(cfg.artifact_path(), 'generate_directions/mean_diffs.pt'))
+
+    return mean_diffs
+
+def generate_and_save_candidate_direction(cfg, model_base, harmful_train, harmless_train):
+    """Generate and save candidate directions."""
+    if not os.path.exists(os.path.join(cfg.artifact_path(), 'generate_direction')):
+        os.makedirs(os.path.join(cfg.artifact_path(), 'generate_direction'))
+
+    mean_diffs = generate_direction(
+        model_base,
+        harmful_train,
+        harmless_train,
+        artifact_dir=os.path.join(cfg.artifact_path(), "generate_direction"))
+
+    torch.save(mean_diffs, os.path.join(cfg.artifact_path(), 'generate_directions/mean_diff.pt'))
 
     return mean_diffs
 
@@ -148,6 +163,7 @@ def run_pipeline(model_path):
 
     # 1. Generate candidate refusal directions
     candidate_directions = generate_and_save_candidate_directions(cfg, model_base, harmful_train, harmless_train)
+    candidate_direction = generate_and_save_candidate_direction(cfg, model_base, harmful_train, harmless_train)
     
     # 2. Select the most effective refusal direction
     pos, layer, direction = select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candidate_directions)
